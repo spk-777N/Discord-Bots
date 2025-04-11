@@ -1,13 +1,11 @@
 const axios = require("axios");
 const { Client, Events, GatewayIntentBits } = require("discord.js");
 const { youtube_channel_ids } = require("./assets/YouTube_channels");
-const fs = require("fs").promises; // مكتبة للتعامل مع الملفات
-
-// Call the dotenv
+const fs = require("fs").promises;
 const dotenv = require("dotenv");
+
 dotenv.config();
 
-// Create Client and give it intents
 const client = new Client({
     intents: [
         GatewayIntentBits.Guilds,
@@ -16,38 +14,35 @@ const client = new Client({
     ],
 });
 
-//scanning file path
 const LAST_CHECK_FILE = "./lastCheck.json";
 
-// reading the lastCheck file
 async function getLastCheckTime() {
     try {
         const data = await fs.readFile(LAST_CHECK_FILE, "utf8");
         return new Date(JSON.parse(data).lastCheck);
     } catch (error) {
+        // If file doesn't exist, return a date far in the past to get all videos
         return new Date(0);
     }
 }
 
-// save the new scann
-async function saveLastCheckTime() {
-    const now = new Date();
-    await fs.writeFile(LAST_CHECK_FILE, JSON.stringify({ lastCheck: now.toISOString() }), "utf8");
+async function saveLastCheckTime(time) {
+    await fs.writeFile(LAST_CHECK_FILE, JSON.stringify({ lastCheck: time.toISOString() }), "utf8");
 }
 
-// Print Ready! Logged in as {client tag} once in console
 client.once(Events.ClientReady, readyClient => {
     console.log(`Ready! Logged in as ${readyClient.user.tag}`);
 
-    // run every 30m
-    sendToDiscord();
-    setInterval(sendToDiscord, 1800000); // every 30m
+    // Initial check
+    checkAndSendVideos();
+    // Check every 20 minutes (1200000 ms) for new videos
+    setInterval(checkAndSendVideos, 1200000);
 });
 
-// Loop on youtube_channel_ids and get new videos
 async function getNewVideos() {
     const videoInfo = [];
-    const lastCheckTime = await getLastCheckTime(); // call lastCheck
+    const lastCheckTime = await getLastCheckTime();
+    const now = new Date();
 
     try {
         for (const channelId of Object.values(youtube_channel_ids)) {
@@ -55,9 +50,10 @@ async function getNewVideos() {
                 params: {
                     part: "snippet",
                     channelId: channelId,
-                    maxResults: 5,
+                    maxResults: 10, // Increased to catch more videos
                     order: "date",
                     type: "video",
+                    publishedAfter: lastCheckTime.toISOString(),
                     key: process.env.YOUTUBE_API,
                 },
             });
@@ -69,7 +65,7 @@ async function getNewVideos() {
                 const publishedAt = new Date(video.snippet.publishedAt);
                 const url = `https://www.youtube.com/watch?v=${videoId}`;
 
-                // add new video after last scann
+                // Only include videos published after last check
                 if (publishedAt > lastCheckTime) {
                     videoInfo.push({
                         title,
@@ -77,48 +73,54 @@ async function getNewVideos() {
                         publishedAt: publishedAt.toISOString(),
                         channelId,
                     });
-
-                    console.log(title);
-                    console.log(url);
-                    console.log(publishedAt);
-                    console.log("------");
                 }
             });
         }
 
-        // Sort from newest to oldest 
-        videoInfo.sort((a, b) => new Date(b.publishedAt) - new Date(a.publishedAt));
-        return videoInfo;
+        // Sort from oldest to newest
+        videoInfo.sort((a, b) => new Date(a.publishedAt) - new Date(b.publishedAt)); // Changed sorting order
+        return { videos: videoInfo, checkTime: now };
     } catch (error) {
-        console.log("the error:", error.message);
-        return [];
+        console.error("Error fetching videos:", error.message);
+        return { videos: [], checkTime: now };
     }
 }
 
-// send to discord channel
-async function sendToDiscord() {
-    const videos = await getNewVideos();
-
+async function sendToDiscord(videos) {
     if (videos.length === 0) {
-        console.log("there is no videos");
+        console.log("No new videos found");
         return;
     }
 
     const channel = client.channels.cache.get(process.env.DISCORD_CHANNEL_ID);
-
     if (!channel) {
-        console.log(" ther is no CHANNEL_ID!");
+        console.error("Channel not found!");
         return;
     }
 
-    videos.forEach(video => {
+    // Send videos one by one to maintain order
+    for (const video of videos) {
         const message = `New Video\nTitle: ${video.title}\nLink: ${video.url}\nDate: ${video.publishedAt}`;
-        channel.send(message);
-    });
-
-    // save the new scann
-    await saveLastCheckTime();
+        try {
+            await channel.send(message);
+            console.log(`Sent video: ${video.title}`);
+        } catch (error) {
+            console.error(`Error sending video ${video.title}:`, error.message);
+        }
+    }
 }
 
-// Login the client
+async function checkAndSendVideos() {
+    const { videos, checkTime } = await getNewVideos();
+
+    if (videos.length > 0) {
+        await sendToDiscord(videos);
+        // Update last check time only after successful sending
+        await saveLastCheckTime(checkTime);
+    } else {
+        // Still update the last check time to avoid checking old videos repeatedly
+        await saveLastCheckTime(checkTime);
+    }
+}
+
 client.login(process.env.DISCORD_TOKEN);
